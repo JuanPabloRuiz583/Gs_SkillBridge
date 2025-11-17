@@ -4,12 +4,35 @@ using System.Text;
 using Gs.Data;
 using Gs.Services;
 
+using HealthChecks.UI.Client;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
+using Microsoft.AspNetCore.Builder;
+using Microsoft.AspNetCore.Diagnostics.HealthChecks;
+using Microsoft.AspNetCore.HttpLogging;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Diagnostics.HealthChecks;
 using Microsoft.IdentityModel.Tokens;
 using Microsoft.OpenApi.Models;
 
 var builder = WebApplication.CreateBuilder(args);
+
+// =========================
+// 🔹 Logging básico (console)
+// =========================
+builder.Logging.ClearProviders();
+builder.Logging.AddConsole();
+
+// =========================
+// 🔹 HTTP Logging (Tracing simples)
+// =========================
+builder.Services.AddHttpLogging(options =>
+{
+    options.LoggingFields =
+        HttpLoggingFields.RequestMethod |
+        HttpLoggingFields.RequestPath |
+        HttpLoggingFields.RequestHeaders |
+        HttpLoggingFields.ResponseStatusCode;
+});
 
 // =========================
 // 🔹 Banco de Dados Oracle
@@ -18,20 +41,52 @@ builder.Services.AddDbContext<AppDbContext>(options =>
     options.UseOracle(builder.Configuration.GetConnectionString("DefaultConnection")));
 
 // =========================
-// 🔹 Injeção de Dependências
+// 🔹 Controllers / Endpoints
 // =========================
-builder.Services.AddScoped<IClienteService, ClienteService>();
-builder.Services.AddScoped<IJobService, JobService>();
-
 builder.Services.AddControllers();
-builder.Services.AddAuthorization();
 builder.Services.AddEndpointsApiExplorer();
 
 // =========================
-// 🔹 Configuração JWT
+// 🔹 CORS (igual MottuSense)
+// =========================
+builder.Services.AddCors(options =>
+{
+    options.AddPolicy("AllowAll", policy =>
+    {
+        policy.AllowAnyOrigin()
+              .AllowAnyHeader()
+              .AllowAnyMethod();
+    });
+});
+
+// =========================
+// 🔹 Injeção de dependências
+// =========================
+builder.Services.AddScoped<IClienteService, ClienteService>();
+builder.Services.AddScoped<IJobService, JobService>();
+builder.Services.AddScoped<ITokenService, TokenService>();
+builder.Services.AddScoped<IRecomendacaoService, RecomendacaoService>();
+
+
+// =========================
+// 🔹 Health Checks
+// =========================
+builder.Services.AddHealthChecks()
+    .AddDbContextCheck<AppDbContext>("oracle")
+    .AddCheck("self", () => HealthCheckResult.Healthy("API está rodando!"));
+
+// 🔹 Health Checks UI
+builder.Services.AddHealthChecksUI(options =>
+{
+    options.SetHeaderText("SkillBridge Health Checks UI");
+    options.AddHealthCheckEndpoint("API Health", "/health");
+}).AddInMemoryStorage();
+
+// =========================
+// 🔹 JWT
 // =========================
 var jwtKey = builder.Configuration["Jwt:Key"]
-             ?? throw new InvalidOperationException("Jwt:Key não configurado em appsettings.json.");
+             ?? "minha-chave-super-secreta-1234567890";
 
 var keyBytes = Encoding.ASCII.GetBytes(jwtKey);
 
@@ -43,25 +98,26 @@ builder.Services
     })
     .AddJwtBearer(options =>
     {
-        options.RequireHttpsMetadata = false; // em produção, ideal: true com HTTPS
+        options.RequireHttpsMetadata = false;
         options.SaveToken = true;
         options.TokenValidationParameters = new TokenValidationParameters
         {
             ValidateIssuerSigningKey = true,
             IssuerSigningKey = new SymmetricSecurityKey(keyBytes),
-
             ValidateIssuer = false,
-            ValidateAudience = false,
-
-            // por padrão o ValidateLifetime é true
-            // Se quiser TESTAR ignorando expiração, descomente a linha abaixo:
-            // ValidateLifetime = false,
-            ClockSkew = TimeSpan.Zero
+            ValidateAudience = false
         };
 
-        // 🔍 Loga o motivo exato do token inválido no console
+        // Logs de JWT (ajuda muito em 401)
         options.Events = new JwtBearerEvents
         {
+            OnMessageReceived = context =>
+            {
+                Console.WriteLine("==== JWT OnMessageReceived ====");
+                Console.WriteLine("Path.........: " + context.Request.Path);
+                Console.WriteLine("Authorization: " + context.Request.Headers["Authorization"]);
+                return Task.CompletedTask;
+            },
             OnAuthenticationFailed = context =>
             {
                 Console.WriteLine("⚠️ ERRO JWT: " + context.Exception.GetType().Name);
@@ -72,7 +128,7 @@ builder.Services
     });
 
 // =========================
-// 🔹 Swagger + JWT (cadeado)
+// 🔹 Swagger + JWT
 // =========================
 builder.Services.AddSwaggerGen(configurationSwagger =>
 {
@@ -80,7 +136,7 @@ builder.Services.AddSwaggerGen(configurationSwagger =>
     {
         Title = "API SkillBridge",
         Version = "v1",
-        Description = "Uma API simples de gerenciamento\r\n> + SOLID\r\n+ CleanCode\r\n+ Documentação com a OpenAPI (Swashbuckle)\r\n",
+        Description = "API de gerenciamento de clientes e vagas\r\n> SOLID\r\n> CleanCode\r\n> OpenAPI (Swashbuckle)\r\n",
         Contact = new OpenApiContact
         {
             Name = "juan"
@@ -89,10 +145,11 @@ builder.Services.AddSwaggerGen(configurationSwagger =>
 
     configurationSwagger.AddSecurityDefinition("Bearer", new OpenApiSecurityScheme
     {
-        Description = "Cole APENAS o token JWT (sem a palavra 'Bearer'). O header será enviado como: Authorization: Bearer {token}",
+        Description = "Cole APENAS o token JWT (sem a palavra 'Bearer'). " +
+                      "O header será enviado como: Authorization: Bearer {token}",
         Name = "Authorization",
         In = ParameterLocation.Header,
-        Type = SecuritySchemeType.Http,   // Http + Bearer -> Swagger adiciona o 'Bearer ' pra você
+        Type = SecuritySchemeType.Http,
         Scheme = "Bearer",
         BearerFormat = "JWT"
     });
@@ -122,17 +179,36 @@ var app = builder.Build();
 // 🔹 Pipeline HTTP
 // =========================
 app.UseSwagger();
-app.UseSwaggerUI(configurationSwagger =>
+app.UseSwaggerUI(c =>
 {
-    configurationSwagger.SwaggerEndpoint("/swagger/v1/swagger.json", "API SkillBridge v1");
-    configurationSwagger.RoutePrefix = string.Empty; // Swagger UI como página inicial
+    c.SwaggerEndpoint("/swagger/v1/swagger.json", "API SkillBridge v1");
+    c.RoutePrefix = string.Empty; // Swagger na raiz
 });
 
 app.UseHttpsRedirection();
 
-app.UseAuthentication(); // 🔐 JWT
+// 🔹 Tracing de requisição/resposta HTTP
+app.UseHttpLogging();
+
+// CORS antes da autenticação/autorização
+app.UseCors("AllowAll");
+
+app.UseAuthentication();
 app.UseAuthorization();
 
 app.MapControllers();
+
+// Endpoint de health check detalhado (JSON)
+app.MapHealthChecks("/health", new HealthCheckOptions
+{
+    ResponseWriter = UIResponseWriter.WriteHealthCheckUIResponse
+});
+
+// Endpoint da interface gráfica do health check
+app.MapHealthChecksUI(options =>
+{
+    options.UIPath = "/health-ui";
+    options.ApiPath = "/health-ui-api";
+});
 
 app.Run();

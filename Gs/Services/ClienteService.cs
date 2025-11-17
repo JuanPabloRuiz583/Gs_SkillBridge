@@ -3,7 +3,7 @@ using System.Collections.Generic;
 using System.Linq;
 
 using Gs.Data;
-using Gs.Dtos;
+using Gs.Dtos.Request;
 using Gs.Models;
 
 namespace Gs.Services
@@ -36,7 +36,7 @@ namespace Gs.Services
         /// <summary>
         /// Cria um novo cliente, validando e-mail duplicado.
         /// </summary>
-        public (Cliente? cliente, string? error) Create(ClienteDTO clienteDto)
+        public (Cliente? cliente, string? error) Create(ClienteRequestDTO clienteDto)
         {
             if (clienteDto == null)
                 return (null, "Dados do cliente são obrigatórios");
@@ -73,24 +73,32 @@ namespace Gs.Services
         /// <summary>
         /// Atualiza os dados de um cliente existente.
         /// </summary>
-        public (Cliente? cliente, string? error) Update(long id, ClienteDTO clienteDto)
+        public (Cliente? cliente, string? error) Update(long id, ClienteRequestDTO clienteDto)
         {
             if (clienteDto == null)
                 return (null, "Dados do cliente são obrigatórios");
 
-            if (id != clienteDto.Id)
-                return (null, "ID do corpo não corresponde ao da URL");
-
-            var cliente = _context.Clientes.Find(id);
+            var cliente = _context.Clientes.Find((int)id);
             if (cliente == null)
                 return (null, "Cliente não encontrado");
 
-            // Atualizações simples (mantém o existente se vier nulo)
+            // Atualizações simples (mantém o existente se vier nulo/vazio)
             if (!string.IsNullOrWhiteSpace(clienteDto.Nome))
                 cliente.Nome = clienteDto.Nome;
 
             if (!string.IsNullOrWhiteSpace(clienteDto.Email))
-                cliente.Email = clienteDto.Email.Trim().ToLowerInvariant();
+            {
+                var emailNormalizado = clienteDto.Email.Trim().ToLowerInvariant();
+
+                // Validação: não permitir alterar para um e-mail já existente em outro cliente
+                var outroCliente = _context.Clientes
+                    .FirstOrDefault(c => c.Id != (int)id && c.Email.ToLower() == emailNormalizado);
+
+                if (outroCliente != null)
+                    return (null, "Já existe outro cliente com esse e-mail");
+
+                cliente.Email = emailNormalizado;
+            }
 
             if (!string.IsNullOrWhiteSpace(clienteDto.Senha))
                 cliente.Senha = clienteDto.Senha;
@@ -107,12 +115,14 @@ namespace Gs.Services
             return (cliente, null);
         }
 
+
+
         /// <summary>
         /// Remove um cliente pelo ID.
         /// </summary>
         public bool Delete(long id)
         {
-            var cliente = _context.Clientes.Find(id);
+            var cliente = _context.Clientes.Find((int)id);
             if (cliente == null)
                 return false;
 
@@ -120,6 +130,7 @@ namespace Gs.Services
             _context.SaveChanges();
             return true;
         }
+
 
         /// <summary>
         /// Autentica um cliente por e-mail e senha.
@@ -137,5 +148,10 @@ namespace Gs.Services
                     c.Email.ToLower() == normalizedEmail &&
                     c.Senha == senha);
         }
+
+
+
+        
+
     }
 }

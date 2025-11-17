@@ -1,14 +1,17 @@
-﻿using Microsoft.EntityFrameworkCore;
-using Gs.Dtos;
-using Gs.Models;
-using System;
-using Gs.Models;
-using Gs.Data;
-using System.Collections.Generic;
+﻿using System.Collections.Generic;
 using System.Threading.Tasks;
+
+using Gs.Data;
+using Gs.Dtos.Request;
+using Gs.Models;
+
+using Microsoft.EntityFrameworkCore;
 
 namespace Gs.Services
 {
+    /// <summary>
+    /// Implementação dos serviços de vagas (Jobs).
+    /// </summary>
     public class JobService : IJobService
     {
         private readonly AppDbContext _context;
@@ -18,34 +21,24 @@ namespace Gs.Services
             _context = context;
         }
 
-        public async Task<IEnumerable<JobDTO>> GetAllAsync()
+        /// <inheritdoc />
+        public async Task<IEnumerable<Job>> GetAllAsync()
         {
             return await _context.Jobs
-                .Select(j => new JobDTO
-                {
-                    Id = j.Id,
-                    Titulo = j.Titulo,
-                    Requisitos = j.Requisitos,
-                    Empresa = j.Empresa
-                })
-            .ToListAsync();
+                .AsNoTracking()
+                .ToListAsync();
         }
 
-        public async Task<JobDTO> GetByIdAsync(int id)
+        /// <inheritdoc />
+        public async Task<Job?> GetByIdAsync(int id)
         {
-            var job = await _context.Jobs.FindAsync(id);
-            if (job == null) return null;
-
-            return new JobDTO
-            {
-                Id = job.Id,
-                Titulo = job.Titulo,
-                Requisitos = job.Requisitos,
-                Empresa = job.Empresa
-            };
+            return await _context.Jobs
+                .AsNoTracking()
+                .FirstOrDefaultAsync(j => j.Id == id);
         }
 
-        public async Task<JobDTO> CreateAsync(JobDTO dto)
+        /// <inheritdoc />
+        public async Task<Job> CreateAsync(JobRequestDTO dto)
         {
             var job = new Job
             {
@@ -57,19 +50,15 @@ namespace Gs.Services
             _context.Jobs.Add(job);
             await _context.SaveChangesAsync();
 
-            return new JobDTO
-            {
-                Id = job.Id,
-                Titulo = job.Titulo,
-                Requisitos = job.Requisitos,
-                Empresa = job.Empresa
-            };
+            return job;
         }
 
-        public async Task<JobDTO> UpdateAsync(int id, JobDTO dto)
+        /// <inheritdoc />
+        public async Task<Job?> UpdateAsync(int id, JobRequestDTO dto)
         {
             var job = await _context.Jobs.FindAsync(id);
-            if (job == null) return null;
+            if (job == null)
+                return null;
 
             job.Titulo = dto.Titulo;
             job.Requisitos = dto.Requisitos;
@@ -78,19 +67,15 @@ namespace Gs.Services
             _context.Jobs.Update(job);
             await _context.SaveChangesAsync();
 
-            return new JobDTO
-            {
-                Id = job.Id,
-                Titulo = job.Titulo,
-                Requisitos = job.Requisitos,
-                Empresa = job.Empresa
-            };
+            return job;
         }
 
+        /// <inheritdoc />
         public async Task<bool> DeleteAsync(int id)
         {
             var job = await _context.Jobs.FindAsync(id);
-            if (job == null) return false;
+            if (job == null)
+                return false;
 
             _context.Jobs.Remove(job);
             await _context.SaveChangesAsync();

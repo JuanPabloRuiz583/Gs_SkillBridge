@@ -1,143 +1,288 @@
-﻿using System;
-using System.Collections.Generic;
-using System.IdentityModel.Tokens.Jwt;
-using System.Security.Claims;
-using System.Text;
+﻿using System.Collections.Generic;
+using System.Linq;
 
-using Gs.Dtos;
+using Gs.Dtos.Request;
+using Gs.Dtos.Response;
 using Gs.Models;
 using Gs.Services;
 
-using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
-using Microsoft.Extensions.Configuration;
-using Microsoft.IdentityModel.Tokens;
+using Microsoft.Extensions.Logging;
 
 namespace Gs.Controllers
 {
+    /// <summary>
+    /// Endpoints para gerenciamento de clientes da plataforma SkillBridge.
+    /// </summary>
     [ApiController]
-    [Route("api/[controller]")]
+    [Route("api/v1/[controller]")]
+    [Produces("application/json")]
     public class ClienteController : ControllerBase
     {
         private readonly IClienteService _clienteService;
-        private readonly IConfiguration _configuration;
+        private readonly ILogger<ClienteController> _logger;
 
-        public ClienteController(IClienteService clienteService,
-                                 IConfiguration configuration)
+        public ClienteController(
+            IClienteService clienteService,
+            ILogger<ClienteController> logger)
         {
             _clienteService = clienteService;
-            _configuration = configuration;
+            _logger = logger;
         }
 
         /// <summary>
-        /// Obtém uma lista de todos os clientes.
+        /// Obtém uma lista de clientes com paginação e links HATEOAS.
         /// </summary>
+        /// <param name="page">Número da página (inicia em 1).</param>
+        /// <param name="pageSize">Quantidade de registros por página.</param>
+        /// <remarks>
+        /// Exemplo de requisição:
+        ///
+        ///     GET /api/v1/Cliente?page=1&amp;pageSize=10
+        ///
+        /// </remarks>
+        /// <returns>Lista paginada de clientes com links.</returns>
+        /// <response code="200">Retorna a lista paginada de clientes.</response>
         [HttpGet]
-        [ProducesResponseType(StatusCodes.Status200OK, Type = typeof(IEnumerable<Cliente>))]
-        public IActionResult GetAll()
+        [ProducesResponseType(StatusCodes.Status200OK, Type = typeof(object))]
+        public ActionResult<object> GetAll(
+            [FromQuery] int page = 1,
+            [FromQuery] int pageSize = 10)
         {
-            var clientes = _clienteService.GetAll();
-            return Ok(clientes);
+            if (page <= 0) page = 1;
+            if (pageSize <= 0) pageSize = 10;
+
+            var traceId = HttpContext.TraceIdentifier;
+
+            var clientes = _clienteService.GetAll().ToList();
+            var total = clientes.Count;
+
+            var pagedClientes = clientes
+                .Skip((page - 1) * pageSize)
+                .Take(pageSize)
+                .ToList();
+
+            var items = pagedClientes.Select(c => new
+            {
+                cliente = MapToResponseDto(c),
+                links = new[]
+                {
+                    new { rel = "self",   href = Url.Action(nameof(GetById), new { id = c.Id }) },
+                    new { rel = "delete", href = Url.Action(nameof(Delete),  new { id = c.Id }) }
+                }
+            });
+
+            var response = new
+            {
+                total,
+                page,
+                pageSize,
+                items,
+                traceId
+            };
+
+            _logger.LogInformation(
+                "Listando clientes - page {Page}, pageSize {PageSize}, total {Total} | traceId {TraceId}",
+                page,
+                pageSize,
+                total,
+                traceId
+            );
+
+            return Ok(response);
         }
 
         /// <summary>
         /// Retorna um cliente específico por ID.
         /// </summary>
+        /// <param name="id">ID do cliente.</param>
+        /// <remarks>
+        /// Exemplo de requisição:
+        ///
+        ///     GET /api/v1/Cliente/1
+        ///
+        /// </remarks>
+        /// <returns>O cliente encontrado ou NotFound.</returns>
+        /// <response code="200">Retorna o cliente.</response>
+        /// <response code="404">Cliente não encontrado.</response>
         [ApiExplorerSettings(IgnoreApi = true)]
-        [HttpGet("{id}")]
-        [ProducesResponseType(StatusCodes.Status200OK, Type = typeof(Cliente))]
+        [HttpGet("{id:long}")]
+        [ProducesResponseType(StatusCodes.Status200OK, Type = typeof(ClienteResponseDTO))]
         [ProducesResponseType(StatusCodes.Status404NotFound)]
-        public IActionResult GetById(long id)
+        public ActionResult<ClienteResponseDTO> GetById(long id)
         {
+            var traceId = HttpContext.TraceIdentifier;
+
             var cliente = _clienteService.GetById(id);
-            if (cliente == null) return NotFound();
-            return Ok(cliente);
+            if (cliente == null)
+            {
+                _logger.LogWarning(
+                    "Cliente {ClienteId} não encontrado | traceId {TraceId}",
+                    id,
+                    traceId
+                );
+
+                return NotFound(new { message = "Cliente não encontrado", traceId });
+            }
+
+            var response = MapToResponseDto(cliente);
+
+            _logger.LogInformation(
+                "Cliente {ClienteId} retornado com sucesso | traceId {TraceId}",
+                id,
+                traceId
+            );
+
+            return Ok(response);
         }
 
         /// <summary>
         /// Cria um novo cliente.
         /// </summary>
+        /// <param name="clienteDto">Dados do cliente a ser criado.</param>
+        /// <remarks>
+        /// O ID do cliente é gerado automaticamente.
+        /// Exemplo de requisição:
+        ///
+        ///     POST /api/v1/Cliente
+        ///     {
+        ///         "nome": "João da Silva",
+        ///         "email": "joao@email.com",
+        ///         "senha": "senha1234",
+        ///         "profissaoAtual": "Desenvolvedor .NET",
+        ///         "competencias": "C#, .NET, SQL"
+        ///     }
+        /// </remarks>
+        /// <returns>O cliente recém-criado, incluindo o ID.</returns>
+        /// <response code="201">Retorna o cliente recém-criado.</response>
+        /// <response code="400">Se o cliente for nulo ou inválido.</response>
+        /// <response code="409">Se já existir um cliente com o mesmo e-mail.</response>
         [HttpPost]
-        [ProducesResponseType(StatusCodes.Status201Created, Type = typeof(Cliente))]
+        [ProducesResponseType(StatusCodes.Status201Created, Type = typeof(ClienteResponseDTO))]
         [ProducesResponseType(StatusCodes.Status400BadRequest)]
         [ProducesResponseType(StatusCodes.Status409Conflict)]
-        public IActionResult Create([FromBody] ClienteDTO clienteDto)
+        public ActionResult<ClienteResponseDTO> Create([FromBody] ClienteRequestDTO clienteDto)
         {
-            if (!ModelState.IsValid) return BadRequest(ModelState);
+            if (!ModelState.IsValid)
+                return BadRequest(ModelState);
+
+            var traceId = HttpContext.TraceIdentifier;
 
             var (cliente, error) = _clienteService.Create(clienteDto);
+
             if (error == "um cliente com esse email ja existe")
-                return Conflict(new { message = error });
+            {
+                _logger.LogWarning(
+                    "Tentativa de criar cliente com e-mail duplicado {Email} | traceId {TraceId}",
+                    clienteDto.Email,
+                    traceId
+                );
+
+                return Conflict(new { message = error, traceId });
+            }
 
             if (cliente == null)
-                return BadRequest();
+            {
+                _logger.LogError(
+                    "Falha ao criar cliente | traceId {TraceId} | erro: {Erro}",
+                    traceId,
+                    error
+                );
 
-            return CreatedAtAction(nameof(GetById), new { id = cliente.Id }, cliente);
+                return BadRequest(new { message = error ?? "Não foi possível criar o cliente", traceId });
+            }
+
+            var response = MapToResponseDto(cliente);
+
+            _logger.LogInformation(
+                "Cliente criado com Id {ClienteId} | traceId {TraceId}",
+                response.Id,
+                traceId
+            );
+
+            return CreatedAtAction(nameof(GetById), new { id = cliente.Id }, response);
         }
 
         /// <summary>
         /// Remove um cliente pelo ID.
         /// </summary>
-        [HttpDelete("{id}")]
+        /// <param name="id">ID do cliente a ser removido.</param>
+        /// <remarks>
+        /// Exemplo de requisição:
+        ///
+        ///     DELETE /api/v1/Cliente/1
+        ///
+        /// </remarks>
+        /// <response code="204">Cliente removido com sucesso.</response>
+        /// <response code="404">Cliente não encontrado.</response>
+        [HttpDelete("{id:long}")]
         [ProducesResponseType(StatusCodes.Status204NoContent)]
         [ProducesResponseType(StatusCodes.Status404NotFound)]
         public IActionResult Delete(long id)
         {
+            var traceId = HttpContext.TraceIdentifier;
+
             var deleted = _clienteService.Delete(id);
-            if (!deleted) return NotFound();
+            if (!deleted)
+            {
+                _logger.LogWarning(
+                    "Tentativa de remover cliente inexistente {ClienteId} | traceId {TraceId}",
+                    id,
+                    traceId
+                );
+
+                return NotFound(new { message = "Cliente não encontrado", traceId });
+            }
+
+            _logger.LogInformation(
+                "Cliente removido Id {ClienteId} | traceId {TraceId}",
+                id,
+                traceId
+            );
+
             return NoContent();
         }
 
+
+
+
+
         /// <summary>
-        /// Realiza o login do cliente e retorna um token JWT.
+        /// Atualiza os dados de um cliente existente.
         /// </summary>
-        [HttpPost("login")]
-        [AllowAnonymous] // login liberado mesmo se você colocar [Authorize] na classe depois
-        [ProducesResponseType(StatusCodes.Status200OK)]
-        [ProducesResponseType(StatusCodes.Status401Unauthorized)]
-        public IActionResult Login([FromBody] LoginDTO loginDto)
+        [HttpPut("{id:long}")]
+        [ProducesResponseType(typeof(Cliente), 200)]
+        [ProducesResponseType(400)]
+        [ProducesResponseType(404)]
+        public IActionResult Update(long id, [FromBody] ClienteRequestDTO clienteDto)
         {
             if (!ModelState.IsValid)
                 return BadRequest(ModelState);
 
-            var cliente = _clienteService.Authenticate(loginDto.Email, loginDto.Senha);
-            if (cliente == null)
-                return Unauthorized(new { message = "Email ou senha inválidos" });
+            var (cliente, error) = _clienteService.Update(id, clienteDto);
+            if (error == "Cliente não encontrado")
+                return NotFound(new { message = error });
+            if (error != null)
+                return BadRequest(new { message = error });
 
-            var tokenHandler = new JwtSecurityTokenHandler();
+            return Ok(cliente);
+        }
 
-            var keyString = _configuration["Jwt:Key"]
-                            ?? throw new InvalidOperationException("Jwt:Key não configurado no appsettings.json");
 
-            var expireMinutesString = _configuration["Jwt:ExpireMinutes"];
-            var expireMinutes = int.TryParse(expireMinutesString, out var minutes) ? minutes : 60;
 
-            var key = Encoding.ASCII.GetBytes(keyString);
-
-            var claims = new[]
+        // =========================
+        // 🔹 Helper de mapeamento
+        // =========================
+        private static ClienteResponseDTO MapToResponseDto(Cliente cliente)
+        {
+            return new ClienteResponseDTO
             {
-                new Claim(ClaimTypes.NameIdentifier, cliente.Id.ToString()),
-                new Claim(ClaimTypes.Email, cliente.Email),
-                new Claim(ClaimTypes.Name, cliente.Nome)
+                Id = cliente.Id,
+                Nome = cliente.Nome,
+                Email = cliente.Email,
+                ProfissaoAtual = cliente.ProfissaoAtual,
+                Competencias = cliente.Competencias
             };
-
-            var tokenDescriptor = new SecurityTokenDescriptor
-            {
-                Subject = new ClaimsIdentity(claims),
-                Expires = DateTime.UtcNow.AddMinutes(expireMinutes),
-                SigningCredentials = new SigningCredentials(
-                    new SymmetricSecurityKey(key),
-                    SecurityAlgorithms.HmacSha256Signature
-                )
-            };
-
-            var token = tokenHandler.CreateToken(tokenDescriptor);
-
-            return Ok(new
-            {
-                token = tokenHandler.WriteToken(token),
-                cliente = new { cliente.Id, cliente.Nome, cliente.Email }
-            });
         }
     }
 }
